@@ -1,0 +1,266 @@
+---
+title: "Single Cell RNA-Seq Analysis: GSE111429"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: hide
+---
+
+# **Introduction**
+I have replicated the single cell RNA-seq figures from a paper by [Wang et al., 2020](https://www.nature.com/articles/s41467-020-14296-y#ref-CR61) , using the data available at [GEO:GSE111429](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE111429). The paper studies the cellular makeup of the prostatic epithelium, since it functions as a great model for stem cell biology. The prostatic epithelium is able to regenerate due in part to the use of Zeb1 & Zeb2, transcription factors that induce migration and regeneration via epithelial mesenchymal transition (EMT). This regenerative ability can also lead to tumor progression through the use of the EMT-regulating transcription factors (Zeb 1/2). Analyzing the heterogeneous cell composition of the prostatic epithelium is necessary to understand the environments that tumors can develop in as certain cells can play a bigger role than others in tumor progression.
+
+### **Data**
+The dataset chosen was from [Series GSE111429](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE111429). The tissue used is from the prostatic epithelium of post-natal mice. Lineage− Sca-1+ CD49fhi PI− prostate cells were used in this analysis.
+
+### **Questions**
+This analysis will replicate the answers to a few bioligical questions posed by the paper. 
+
+1. How was this data filtered for downstream analysis?
+
+2. How do the cells in the dataset provided cluster when ran through seurat clustering?
+
+3. What cell types is each cluster composed of? (epithelial? endothelial? immune?)
+
+# Code
+
+### **Library**
+```{r warning = FALSE, message = FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(ggpubr)
+library(tidyverse)
+library(fgsea)
+library(msigdbr)
+library(data.table)
+library(ggplot2)
+library(pathview)
+library(biomaRt)
+library(fgsea)
+library(msigdbr)
+library(data.table)
+library(ggplot2)
+```
+
+
+### **Read in the Data**
+```{r warning = FALSE, message = FALSE}
+data <- Read10X(data.dir="~/GSE111429/GSE111429_RAW/")
+
+srt <- CreateSeuratObject(count=data, 
+                          min.cells=0, 
+                          min.features=0, 
+                          project="PG")
+```
+
+### **Quality Control**
+
+#### *Q1. How was this data filtered for downstream analysis?*
+
+I filtered the single cell RNA-seq data by filtering out low quality cells. Now that the low quality cells have been removed, the data is ready for downstream analysis. The supplementary files provided with this paper uses violin plots to show the difference between the data before and after the poor quality cells were removed.
+
+```{r warning = FALSE, message = FALSE}
+#PercentageFeatureSet(): calculate the % of all the counts belonging to a subset of the possible features for each cell. This is useful when trying to compute the percentage of transcripts that map to mitochondrial genes
+srt <- PercentageFeatureSet(srt, 
+                               pattern="^mt-",
+                               col.name="percent.mt")
+
+#save the violin plot prior to subsetting data for downstream analysis
+presubset <- VlnPlot(srt, features = c('nFeature_RNA','nCount_RNA','percent.mt'))
+
+
+#Poor-quality cells removed
+  #nFeature: less than 1400 removed
+  #NCount_RNA: less than 5000 UMIs removed 
+  #percent.mt: more than 5% UMI mapped to mitochondria genes were removed. 
+srt <- subset(srt, subset=nFeature_RNA > 1400 & nCount_RNA > 5000 & percent.mt < 5)
+
+#save the violin plot after subsetting data for downstream analysis
+postsubset <- VlnPlot(srt, features =c('nFeature_RNA','nCount_RNA','percent.mt'))
+
+
+#compare the difference before and after filtering
+#ggarrange(presubset,postsubset, ncol = 1, nrow = 2, widths = 0.1)
+```
+
+#### Prior to Filtering 
+```{r warning = FALSE, message = FALSE}
+presubset
+```
+
+#### After Filtering 
+```{r warning = FALSE, message = FALSE}
+postsubset
+```
+
+
+### **Standard Workflow**
+
+#### *Q2. How do the cells in the dataset provided cluster when ran through seurat clustering?*
+
+I have provided a visualization of how the dataset clusters with the surat program. The tSNE plot provided below is different from the one in the paper as non-linear reduction does not produce the same graph every time.
+
+```{r warning = FALSE, message = FALSE, results = FALSE}
+srt <- NormalizeData(srt, 
+                     normalization.method = 'LogNormalize', 
+                     scale.factor = 1e4)
+
+srt <- FindVariableFeatures(srt,
+                               nfeatures=1606,
+                               mean.cutoff=c(0.0125,3),
+                               dispersion.cutoff=c(0.5, Inf))
+
+srt <- ScaleData(srt, 
+                 vars.to.regress=c('nCount_RNA','percent.mt'))
+
+srt <- RunPCA(srt, 
+                 features = VariableFeatures(object = srt), 
+                 verbose = TRUE, 
+                 ndims.print=1:5, 
+                 nfeatures.print = 5)
+
+srt <- FindNeighbors(srt, 
+                     dims = 1:12)
+
+srt <- FindClusters(srt, 
+                    resolution=c(0.2,0.3,0.4,0.5))
+
+#runTSNE used for non-linear reduction of the dimension
+srt <- RunTSNE(srt, 
+               dims = 1:12, 
+               do.fast=TRUE)
+
+#Idents(): finds clusters
+Idents(object = srt) <- srt$RNA_snn_res.0.2
+
+```
+
+```{r}
+#corresponds to figure 6a, non-linear reduction doesn't produce the exact same each ti  me
+DimPlot(srt, reduction = "tsne", label = TRUE, pt.size = 1, label.size = 6)
+```
+
+### **Identifying non-Epithelial Cells**
+
+#### *Q3. What cell types is each cluster composed of? (epithelial? endothelial? Immune?)*
+
+Now that I have identified clusters, I can run the FeaturePlot() function to identify single cells on a dimensional reduction plot by using a feature they have in common. This will visualize clusters of a specific cell type. For example, the endothelial cell markers (Eng, S1pr1 and Emcn) are shown to be highly expressed by cluster 5 in figure 6i-k in the supplementary material  (Wang et al., 2020). Cluster 5 in the paper would correspond to cluster 4 in this analysis, and the connection between this group of cells and endothelial cell markers is shown below. Compared to the violin plots provided by Wang et al. (2020), the analysis below shows the immune cell markers, Cd74 and Cd72, are highly expressed in the the third (cluster 2) and ninth (cluster 8) clusters instead of the tenth cluster. 
+
+```{r warning = FALSE, message = FALSE}
+#Cd74, Cd72 and Cd54 are immune cell markers
+FeaturePlot(srt, features= c('Cd74','Cd72'),  
+            reduction='tsne', pt.size = 0.9, label = T, ncol = 3)
+#'Eng','S1pr1', and 'Emcn'are endothelial cell markers (cluster 4)
+FeaturePlot(srt, features=c('Eng','S1pr1','Emcn'), 
+            reduction = 'tsne', pt.size = 0.9, label = T, ncol = 3)
+```
+
+### **Violin Plots**
+Below are violin plots of endothelial and immune cell associated genes. The violin plots show which clusters express each cell type marker the most. This analysis suggests that cluster 4 and 9 are highly associated with endothelial cell markers. Immune cell markers are not as strongly associated with a specific cluster as a whole since only Cd72 is highly expressed in both clusters 2 and 8. CD74 was only found to be expressed in cluster 8. 
+
+```{r warning = FALSE, message = FALSE}
+# violin plots for each class of markers
+vp1 <- VlnPlot(srt, features = c("EpCAM","Cdh1","Krt5", "Krt14"), ncol = 4) #Epithelial 
+vp2 <- VlnPlot(srt, features = c("Igfbp4","Fn1","Gng11"), ncol = 3) # stromal 
+vp3 <- VlnPlot(srt, features = c("Eng","S1pr1","Emcn"), ncol = 3) # endothelial 
+vp4 <- VlnPlot(srt, features = c("Cd74","Cd72"), ncol = 2) #immune 
+
+#this is numbered 0-9, but matches with 1-10
+ggarrange(vp1, vp2, ncol = 1)
+ggarrange(vp3, vp4, ncol = 1)
+```
+
+### **Subsetting**
+
+Subset the data to exclude clusters 4 and 8 (the endothelial and immune cell clusters respectively). This way, downstream analysis can focus on the expression of epithelial cells. I have also added a new tSNE plot, which showcases the new clustering of exclusively epithelial cells. 
+
+```{r warning = FALSE, message = FALSE, results = FALSE}
+#subset the data removing clusters 4 and 8
+srt <- subset(srt,
+              idents=c("4","8"), #Subset Seurat object based on identity class
+              invert=TRUE)
+
+DefaultAssay(srt) <- "RNA"
+
+#normalize the data
+srt <- NormalizeData(srt,
+                     normalization.method='LogNormalize', #feature cell count / total cell count * scale factor
+                     scale.factors=1e4)
+
+#find variable features -> Identifies features that are outliers on a 'mean variability plot
+srt <- FindVariableFeatures(srt,
+                            mean.function=ExpMean, #slct fx compute x-axis value (average expression)
+                            #mean of the detected values is the default function 
+                            dispersion.function=LogVMR, #slct fx to compute y-axis value (dispersion)
+                            mean.cutoff=c(0.0125,3), #range for feature means
+                            dispersion.cutoff=c(0.5,Inf)) #range for feature dispersions 
+
+
+#scale the data
+srt <-ScaleData(srt, vars.to.regress = c('nCount_RNA', 'percent.mt')) #variable that needs to be regressed out
+
+#PCA
+srt <-RunPCA(srt,
+             features = VariableFeatures(object = srt),
+             verbose=TRUE, #prints the genes associated with high and low loading for principal components
+             nfeatures.print=5, #the # of genes to print for each principal component
+             ndims.print=1:5) #the # of principal components to print genes for 
+
+#find neighbors -> Computes the k.param nearest neighbors for a given dataset
+srt <- FindNeighbors(srt, dims=1:12)
+
+#find clusters -> Identify clusters of cells by a shared nearest neighbor
+srt <- FindClusters(srt, resolution=c(0.2,0.3,0.4,0.5))
+
+#runTSNSE ->  dimensionality reduction on selected features
+srt <- RunTSNE(srt, 
+               dims = 1:12, 
+               do.fast=TRUE #runs the Barnes-hut implementation (makes it faster)
+               )
+#Get an object's identity class
+Idents(object = srt) <- srt$RNA_snn_res.0.5
+
+#save seurat object after subsetting
+# saveRDS(srt, file = "srt_sub.RDS")
+# srt_sub <- readRDS("srt_sub.RDS")
+
+```
+
+```{r warning = FALSE, message = FALSE}
+DimPlot(srt, label = T, pt.size = 1, label.size = 6)
+```
+
+### **tSNE Plot**
+
+This tSNE plot aligns with figure 6A from the paper (Wang et al., 2020) as it identifies cluster 7 as the only cluster expressing genes involved in epithelial mesenchymal transition. Zeb1, Zeb2, Prrx1 and Prrx2 are all EMT genes that highlight cluster 7 due to it's EMT expression profile. 
+
+```{r warning = FALSE, message = FALSE}
+FeaturePlot(srt, features= c('Zeb1', 'Zeb2'),  
+           reduction='tsne', pt.size = 0.9, label = T, ncol = 3)
+
+FeaturePlot(srt, features= c('Prrx1','Prrx2'),  
+           reduction='tsne', pt.size = 0.9, label = T, ncol = 3)
+```
+
+### **Heatmap**
+This heatmap presents the scaled expression profile for several genes related to epithelial mesenchymal transition. Cluster 7 shows a high expression of EMT genes (Zeb2, Prrx1, Prrx2). The heatmap also compares to the same heatmap in Figure 6b of the paper (Wang et al., 2020). 
+
+```{r warning = FALSE, message = FALSE, figure.align = "center", figure.height = 10, figure.width = 15}
+
+################################################
+# Doheatmap
+
+genes <- c('Zeb1', 'Zeb2','Prrx1','Prrx2', 'Snai1','Snai2', 'Foxc2', 'Vim', 'S100a4','Ocln', 'Fn1','Twist1','Cdh1', 'Twist2', 'Acta2', 'Ocln', 'Cdh2', 'Epcam')
+# Option 1
+DoHeatmap(srt, features = genes, lines.width = 10)
+```
+
+
+# **References**
+
+### **Citations**
+1. Kwon, Yeo-Jung, et al. "CYP1B1 enhances cell proliferation and metastasis through induction of EMT and activation of Wnt/β-catenin signaling via Sp1 upregulation." PloS one 11.3 (2016): e0151598.
+
+2. Wang, Xue, et al. "Identification of a Zeb1 expressing basal stem cell subpopulation in the prostate." Nature communications 11.1 (2020): 706.
